@@ -1,0 +1,397 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Titeuf - Ze Gag Machine</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { width: 100%; height: 100%; overflow: hidden; background: #000; }
+canvas {
+    display: block;
+    width: 100vw;
+    height: 100vh;
+    image-rendering: pixelated;
+    cursor: none;
+}
+#loading {
+    position: fixed; inset: 0;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: center;
+    background: #1a0a2e;
+    color: #ffd700;
+    font-family: 'Comic Sans MS', cursive;
+    font-size: 28px;
+    z-index: 100;
+    transition: opacity 0.5s;
+}
+#loading .bar-bg {
+    width: 300px; height: 20px;
+    background: #2a1a3e; border-radius: 10px;
+    margin-top: 20px; overflow: hidden;
+}
+#loading .bar-fill {
+    width: 0%; height: 100%;
+    background: linear-gradient(90deg, #ff6b35, #ffd700);
+    border-radius: 10px;
+    transition: width 0.3s;
+}
+</style>
+</head>
+<body>
+<div id="loading">
+    <div>Chargement de Titeuf...</div>
+    <div class="bar-bg"><div class="bar-fill" id="loadBar"></div></div>
+</div>
+<canvas id="game"></canvas>
+<script>
+(() => {
+    'use strict';
+
+    // ========== CONFIG ==========
+    const CONFIG = {
+        // Map (drawn at half scale in world space)
+        MAP_SCALE: 0.5,
+        MAP_W: 1536 * 0.5,  // 768
+        MAP_H: 1024 * 0.5,  // 512
+        // Sprite sheets: all 256x128, grid 4 cols x 2 rows, cells 64x64
+        SPRITE_COLS: 4,
+        SPRITE_CELL_W: 64,
+        SPRITE_CELL_H: 64,
+        // Player
+        PLAYER_SCALE: 1.8,
+        PLAYER_SPEED: 4.0,
+        ANIM_SPEED: 0.13,
+        // Camera
+        CAMERA_ZOOM: 3.4,
+        CAMERA_LERP: 0.08,
+        // Collision
+        PLAYER_HITBOX: { w: 45, h: 20, offsetY: 18 },
+    };
+
+    const S = CONFIG.MAP_SCALE;
+    const P_RENDER_W = CONFIG.SPRITE_CELL_W * CONFIG.PLAYER_SCALE;
+    const P_RENDER_H = CONFIG.SPRITE_CELL_H * CONFIG.PLAYER_SCALE;
+
+    // ========== COLLISION RECTS ==========
+    const COLLIDERS = [
+        { x: 0, y: 0, w: CONFIG.MAP_W, h: 80 },
+        { x: 0, y: 0, w: 5, h: CONFIG.MAP_H },
+        { x: CONFIG.MAP_W - 5, y: 0, w: 5, h: CONFIG.MAP_H },
+        { x: 0, y: CONFIG.MAP_H - 5, w: CONFIG.MAP_W, h: 5 },
+        { x: 36, y: 55, w: 78, h: 40 },
+        { x: 545, y: 55, w: 78, h: 40 },
+        { x: 650, y: 55, w: 78, h: 40 },
+        { x: 320, y: 105, w: 100, h: 55 },
+        { x: 115, y: 175, w: 130, h: 60 },
+        { x: 500, y: 175, w: 145, h: 60 },
+        { x: 100, y: 350, w: 165, h: 60 },
+        { x: 480, y: 350, w: 165, h: 60 },
+    ];
+
+    // Frame counts per animation (idle = 5, running = 8)
+    const ANIM_FRAMES = {
+        idle: 5,
+        idle_down: 5,
+        idle_up: 5,
+        idle_diag_haut: 5,
+        idle_diag_bas: 5,
+        run: 8,
+        run_down: 8,
+        run_up: 8,
+        diag: 8,
+        diag_bas: 8,
+    };
+
+    // ========== STATE ==========
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+    const keys = {};
+    const player = {
+        x: 350, y: 280,
+        facingLeft: true,
+        frame: 0,
+        animTimer: 0,
+        moving: false,
+        currentAnim: 'idle',
+        lastDirection: 'side', // 'side', 'down', 'up'
+    };
+    const camera = { x: 350, y: 280 };
+    let images = {};
+    let lastTime = 0;
+
+    // ========== LOADING ==========
+    function loadImages() {
+        return new Promise((resolve) => {
+            const sources = {
+                map: 'images/salle_classe.png',
+                idle: 'images/titeuf_regarde_droite_gauche.png',
+                idle_down: 'images/titeuf_regarde_bas.png',
+                idle_up: 'images/titeuf_regarde_haut.png',
+                idle_diag_haut: 'images/titeuf_regarde_diag_haut.png',
+                idle_diag_bas: 'images/titeuf_regarde_diag_bas.png',
+                run: 'images/titeuf_court_horizontale.png',
+                diag: 'images/titeuf_court_diag.png',
+                diag_bas: 'images/titeuf_court_diag_bas.png',
+                run_down: 'images/titeuf_court_bas.png',
+                run_up: 'images/titeuf_court_haut.png',
+            };
+            const total = Object.keys(sources).length;
+            let count = 0;
+            const bar = document.getElementById('loadBar');
+
+            for (const [key, src] of Object.entries(sources)) {
+                const img = new Image();
+                img.onload = () => {
+                    count++;
+                    bar.style.width = (count / total * 100) + '%';
+                    if (count === total) {
+                        setTimeout(() => {
+                            document.getElementById('loading').style.opacity = '0';
+                            setTimeout(() => {
+                                document.getElementById('loading').style.display = 'none';
+                                resolve();
+                            }, 500);
+                        }, 300);
+                    }
+                };
+                img.src = src;
+                images[key] = img;
+            }
+        });
+    }
+
+    // ========== INPUT ==========
+    window.addEventListener('keydown', (e) => {
+        if (e.code === 'F11' || e.code === 'F12' || e.code === 'F5') return;
+        keys[e.code] = true;
+        e.preventDefault();
+    });
+    window.addEventListener('keyup', (e) => {
+        if (e.code === 'F11' || e.code === 'F12' || e.code === 'F5') return;
+        keys[e.code] = false;
+        e.preventDefault();
+    });
+
+    function getInput() {
+        let dx = 0, dy = 0;
+        if (keys['ArrowLeft'] || keys['KeyQ']) dx -= 1;
+        if (keys['ArrowRight'] || keys['KeyD']) dx += 1;
+        if (keys['ArrowUp'] || keys['KeyZ']) dy -= 1;
+        if (keys['ArrowDown'] || keys['KeyS']) dy += 1;
+        if (dx !== 0 && dy !== 0) {
+            const inv = 1 / Math.SQRT2;
+            dx *= inv; dy *= inv;
+        }
+        return { dx, dy };
+    }
+
+    function getRawInput() {
+        const dx = (keys['ArrowLeft'] || keys['KeyQ'] ? -1 : 0) + (keys['ArrowRight'] || keys['KeyD'] ? 1 : 0);
+        const dy = (keys['ArrowUp'] || keys['KeyZ'] ? -1 : 0) + (keys['ArrowDown'] || keys['KeyS'] ? 1 : 0);
+        return { dx, dy };
+    }
+
+    // ========== COLLISION ==========
+    function playerHitbox(px, py) {
+        return {
+            x: px - CONFIG.PLAYER_HITBOX.w / 2,
+            y: py + CONFIG.PLAYER_HITBOX.offsetY - CONFIG.PLAYER_HITBOX.h / 2,
+            w: CONFIG.PLAYER_HITBOX.w,
+            h: CONFIG.PLAYER_HITBOX.h,
+        };
+    }
+    function rectsOverlap(a, b) {
+        return a.x < b.x + b.w && a.x + a.w > b.x &&
+               a.y < b.y + b.h && a.y + a.h > b.y;
+    }
+    function canMove(nx, ny) {
+        const hb = playerHitbox(nx, ny);
+        for (const c of COLLIDERS) {
+            if (rectsOverlap(hb, c)) return false;
+        }
+        return true;
+    }
+
+    // ========== DETERMINE ANIMATION ==========
+    function getIdleAnim() {
+        switch (player.lastDirection) {
+            case 'down': return 'idle_down';
+            case 'up': return 'idle_up';
+            case 'diag_haut': return 'idle_diag_haut';
+            case 'diag_bas': return 'idle_diag_bas';
+            default: return 'idle'; // side
+        }
+    }
+
+    function getAnimState(raw) {
+        if (raw.dx === 0 && raw.dy === 0) return getIdleAnim();
+        if (raw.dy < 0 && raw.dx !== 0) return 'diag';       // up + horizontal
+        if (raw.dy > 0 && raw.dx !== 0) return 'diag_bas';   // down + horizontal
+        if (raw.dy > 0 && raw.dx === 0) return 'run_down';   // pure down
+        if (raw.dy < 0 && raw.dx === 0) return 'run_up';     // pure up
+        return 'run'; // pure horizontal
+    }
+
+    // ========== UPDATE ==========
+    function update(dt) {
+        const input = getInput();
+        const raw = getRawInput();
+        const speed = CONFIG.PLAYER_SPEED;
+        
+        player.moving = (input.dx !== 0 || input.dy !== 0);
+
+        // Track last direction for idle
+        if (player.moving) {
+            if (raw.dy > 0 && raw.dx === 0) player.lastDirection = 'down';
+            else if (raw.dy < 0 && raw.dx === 0) player.lastDirection = 'up';
+            else if (raw.dy < 0 && raw.dx !== 0) player.lastDirection = 'diag_haut';
+            else if (raw.dy > 0 && raw.dx !== 0) player.lastDirection = 'diag_bas';
+            else player.lastDirection = 'side';
+        }
+
+        // Animation state
+        const newAnim = getAnimState(raw);
+        if (newAnim !== player.currentAnim) {
+            player.currentAnim = newAnim;
+            player.frame = 0;
+            player.animTimer = 0;
+        }
+
+        if (player.moving) {
+            if (raw.dx < 0) player.facingLeft = true;
+            else if (raw.dx > 0) player.facingLeft = false;
+
+            const nx = player.x + input.dx * speed;
+            const ny = player.y + input.dy * speed;
+            if (canMove(nx, ny)) { player.x = nx; player.y = ny; }
+            else if (canMove(nx, player.y)) { player.x = nx; }
+            else if (canMove(player.x, ny)) { player.y = ny; }
+
+            player.x = Math.max(20, Math.min(CONFIG.MAP_W - 20, player.x));
+            player.y = Math.max(230 * S + 20, Math.min(CONFIG.MAP_H - 20, player.y));
+
+            // Faster animation when running (horizontal or diagonal)
+            const isRunning = player.currentAnim === 'run' || player.currentAnim === 'diag' || player.currentAnim === 'diag_bas' || player.currentAnim === 'run_down' || player.currentAnim === 'run_up';
+            const runMultiplier = isRunning ? 2.5 : 1.5;
+            player.animTimer += CONFIG.ANIM_SPEED * runMultiplier;
+        } else {
+            // Idle at 9 FPS
+            player.animTimer += 9 / 60;
+        }
+
+        if (player.animTimer >= 1) {
+            player.animTimer = 0;
+            player.frame = (player.frame + 1) % ANIM_FRAMES[player.currentAnim];
+        }
+
+        camera.x += (player.x - camera.x) * CONFIG.CAMERA_LERP;
+        camera.y += (player.y - camera.y) * CONFIG.CAMERA_LERP;
+    }
+
+    // ========== RENDER ==========
+    function render() {
+        const cw = canvas.width;
+        const ch = canvas.height;
+        const zoom = CONFIG.CAMERA_ZOOM;
+
+        ctx.clearRect(0, 0, cw, ch);
+        ctx.save();
+
+        const viewW = cw / zoom;
+        const viewH = ch / zoom;
+        let camX = Math.max(viewW / 2, Math.min(CONFIG.MAP_W - viewW / 2, camera.x));
+        let camY = Math.max(viewH / 2, Math.min(CONFIG.MAP_H - viewH / 2, camera.y));
+
+        ctx.scale(zoom, zoom);
+        ctx.translate(-camX + viewW / 2, -camY + viewH / 2);
+
+        // Map
+        ctx.drawImage(images.map, 0, 0, CONFIG.MAP_W, CONFIG.MAP_H);
+
+        // Shadow
+        ctx.save();
+        ctx.globalAlpha = 0.25;
+        ctx.fillStyle = '#000';
+        ctx.beginPath();
+        ctx.ellipse(player.x, player.y + 5, P_RENDER_W * 0.35, 4, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+
+        // Sprite - compute grid position from frame index
+        const spriteImg = images[player.currentAnim];
+        const col = player.frame % CONFIG.SPRITE_COLS;
+        const row = Math.floor(player.frame / CONFIG.SPRITE_COLS);
+        const srcX = col * CONFIG.SPRITE_CELL_W;
+        const srcY = row * CONFIG.SPRITE_CELL_H;
+
+        ctx.save();
+        ctx.translate(player.x, player.y);
+        
+        // Flip: sprites face right by default, flip when facing left
+        // Vertical animations (down, run_down, run_up) have no flip
+        const noFlip = player.currentAnim === 'idle_down' || player.currentAnim === 'idle_up' || player.currentAnim === 'run_down' || player.currentAnim === 'run_up';
+        if (!noFlip && player.facingLeft) {
+            ctx.scale(-1, 1);
+        }
+
+        // Draw anchored at feet
+        ctx.drawImage(
+            spriteImg,
+            srcX, srcY, CONFIG.SPRITE_CELL_W, CONFIG.SPRITE_CELL_H,
+            -P_RENDER_W / 2, -P_RENDER_H + 12,
+            P_RENDER_W, P_RENDER_H
+        );
+        ctx.restore();
+
+        // DEBUG (uncomment to debug)
+        /*
+        ctx.save();
+        ctx.strokeStyle = 'rgba(255,0,0,0.5)';
+        ctx.lineWidth = 1;
+        for (const c of COLLIDERS) ctx.strokeRect(c.x, c.y, c.w, c.h);
+        const hb = playerHitbox(player.x, player.y);
+        ctx.strokeStyle = 'rgba(0,255,0,0.8)';
+        ctx.strokeRect(hb.x, hb.y, hb.w, hb.h);
+        ctx.restore();
+        */
+
+        ctx.restore();
+    }
+
+    // ========== RESIZE ==========
+    function resize() {
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+        ctx.imageSmoothingEnabled = false;
+    }
+    window.addEventListener('resize', resize);
+
+    // ========== GAME LOOP ==========
+    const FRAME_TIME = 1000 / 60;
+    let accumulator = 0;
+
+    function gameLoop(timestamp) {
+        if (!lastTime) lastTime = timestamp;
+        const elapsed = timestamp - lastTime;
+        lastTime = timestamp;
+        accumulator += elapsed;
+        while (accumulator >= FRAME_TIME) {
+            update(FRAME_TIME);
+            accumulator -= FRAME_TIME;
+        }
+        render();
+        requestAnimationFrame(gameLoop);
+    }
+
+    async function init() {
+        resize();
+        await loadImages();
+        requestAnimationFrame(gameLoop);
+    }
+
+    init();
+})();
+</script>
+</body>
+</html>
